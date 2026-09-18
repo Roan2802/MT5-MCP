@@ -44,3 +44,5 @@ Logs/*.log
 # Output (keep dirs, ignore contents)
 outputs/html_reports/*
 outputs/excel_reports/*
+_verify_import.py
+_init.json
