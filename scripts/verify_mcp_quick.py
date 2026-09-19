@@ -1,25 +1,26 @@
-import os, sys, json
+"""Standalone verification script for MT5-MCP — reproduces the E2E test.
+
+Usage:
+    cd C:\AI\MT5_MCP\MT5-MCP-main
+    set PYTHONPATH=
+    .venv\Scripts\python.exe scripts\verify_mcp_quick.py
+
+Run AFTER starting the portable MT5 (START-MT5-IC-MARKETS.bat in desktop).
+"""
+import os, sys
 if "PYTHONPATH" in os.environ:
     del os.environ["PYTHONPATH"]
 sys.path.insert(0, r"C:\AI\MT5_MCP\MT5-MCP-main\src")
+from mcp_mt5.main import initialize, get_terminal_info, get_account_info, list_strategies, compile_mql5, shutdown
 
-import MetaTrader5 as mt5
-from mcp_mt5.main import _get_mt5_paths, compile_mql5, list_strategies
-
-paths = _get_mt5_paths()
-r = mt5.initialize(path=paths["terminal"])
-print("1. initialize:", r, mt5.last_error() if not r else "")
-if r:
-    ai = mt5.account_info()
-    print("2. account_info:", "login=%s server=%s balance=%s trade_allowed=%s" % (ai.login, ai.server, ai.balance, ai.trade_allowed))
-
-# list_strategies (filesystem-based, no mt5 IPC needed)
-strs = list_strategies()
-print("3. list_strategies:", len(strs) if isinstance(strs, list) else strs)
-
-# compile_mql5
-mq5 = r"C:\AI\MT5_ICMarkets_Global\MQL5\Experts\Examples\Moving Average\Moving Average.mq5"
-c = compile_mql5(filepath=mq5)
-print("4. compile_mql5:", c.get("success") if isinstance(c, dict) else c)
-mt5.shutdown()
-print("5. shutdown: done")
+print("Prerequisites: MT5 portable running (START-MT5-IC-MARKETS.bat)")
+print("1. initialize():", initialize())
+ti = get_terminal_info()
+print("2. get_terminal_info:", ti.get("name"), "build", ti.get("build"))
+ai = get_account_info()
+print("3. get_account_info: login=%s server=%s balance=%s trade_allowed=%s" % (
+    ai.login, ai.server, ai.balance, ai.trade_allowed))
+print("4. list_strategies: %d items" % len(list_strategies()))
+c = compile_mql5(filepath=r"C:\AI\MT5_ICMarkets_Global\MQL5\Experts\Examples\Moving Average\Moving Average.mq5")
+print("5. compile_mql5: success=%s ex5_exists=%s" % (c.get("success"), c.get("ex5_exists")))
+print("6. shutdown():", shutdown())

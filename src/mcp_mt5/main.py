@@ -571,7 +571,7 @@ def _auto_login_if_needed() -> bool:
 
 # Initialize MetaTrader 5 connection
 @mcp.tool()
-def initialize(path: str) -> bool:
+def initialize(path: str | None = None) -> bool:
     """
     Initialize the MetaTrader 5 terminal.
 
@@ -702,8 +702,27 @@ def get_account_info() -> AccountInfo:
     return AccountInfo(**account_dict)
 
 
-# Get terminal information
-@mcp.tool()
+# Auto-initialize helper (private — NOT an MCP tool)
+def _ensure_mt5_connected() -> bool:
+    """Auto-initialize MT5 if no IPC connection exists.
+
+    Returns True if connected (already or freshly initialized), False if
+    initialization failed (e.g. no running terminal + headless spawn fails).
+    """
+    if mt5.terminal_info() is None:
+        err = mt5.last_error()
+        # -10004 = No IPC connection → terminal not started or not inited
+        if err == -10004 or err == -10003:
+            logger.info("No IPC connection (err %s); calling initialize()...", err)
+            paths = _get_mt5_paths()
+            # NOTE: empirically, the MetaTrader5 package requires path= the
+            # *terminal64.exe* path (not the data folder) to attach to a running
+            # instance. path= <data_folder> gives "IPC initialize failed".
+            return mt5.initialize(path=paths["terminal"])
+        return False
+    return True
+
+
 def get_terminal_info() -> dict[str, Any]:
     """
     Get information about the MetaTrader 5 terminal.
@@ -711,11 +730,11 @@ def get_terminal_info() -> dict[str, Any]:
     Returns:
         Dict[str, Any]: Information about the terminal.
     """
-    terminal_info = mt5.terminal_info()
-    if terminal_info is None:
+    if not _ensure_mt5_connected():
         logger.error(f"Failed to get terminal info, error code: {mt5.last_error()}")
         raise ValueError("Failed to get terminal info")
 
+    terminal_info = mt5.terminal_info()
     # Convert named tuple to dictionary
     return terminal_info._asdict()
 
