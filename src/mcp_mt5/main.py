@@ -569,6 +569,65 @@ def _auto_login_if_needed() -> bool:
     return ok
 
 
+def _spawn_portable_mt5(paths: dict) -> bool:
+    """Start the portable MT5 terminal (with /portable flag) if it is not
+    already running. Returns True if a terminal is running after this call.
+
+    We use /portable so MT5 writes ALL data (accounts.dat, EBWebView, server
+    cache) into C:\\AI\\MT5_ICMarkets_Global\\… instead of
+    %APPDATA%\\MetaQuotes\\Terminal\\<hash>.  WITHOUT /portable the terminal
+    creates the shared roaming hash dir and hits a WebView2 permission-dialog
+    ('De gegevensmap kan niet worden gemaakt') that blocks headless IPC.
+    """
+    import subprocess, time
+
+    exe = paths["terminal"]
+    if not os.path.exists(exe):
+        logger.error("Portable terminal executable not found: %s", exe)
+        return False
+
+    # Already running?
+    try:
+        tasklist = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq terminal64.exe"],
+            capture_output=True, text=True
+        )
+        if "terminal64.exe" in tasklist.stdout:
+            return True
+    except Exception:
+        pass
+
+    # Start portable, detached in the user's desktop session.
+    cwd = os.path.dirname(exe)
+    try:
+        subprocess.Popen(
+            [exe, "/portable"],
+            cwd=cwd,
+            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+        )
+        logger.info("Started portable MT5: %s /portable", exe)
+    except Exception as e:
+        logger.error("Failed to spawn portable MT5: %s", e)
+        return False
+
+    # Give it time to write accounts.dat / IPC server
+    for _ in range(12):
+        time.sleep(2.5)
+        if mt5.initialize(path=exe):
+            return True
+        try:
+            if "terminal64.exe" in subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq terminal64.exe"],
+                capture_output=True, text=True
+            ).stdout:
+                return True
+        except Exception:
+            pass
+    logger.warning("Portable MT5 spawned but not yet connectable")
+    return False
+
+
 # Initialize MetaTrader 5 connection
 @mcp.tool()
 def initialize(path: str | None = None) -> bool:
@@ -600,12 +659,17 @@ def initialize(path: str | None = None) -> bool:
     # data_folder = the portable Config dir (used for mt5-login.env etc.)
     data_folder = os.path.dirname(path)
 
-    # Connect to a *running* MT5 terminal. Passing the terminal64.exe path to
-    # `path=` makes the MetaTrader5 package reuse the live IPC server if MT5
-    # is already started (by START-MT5-IC-MARKETS.bat in the desktop session).
-    # accounts.dat keeps login persistent, so no separate login() is needed.
+    # Ensure a portable MT5 terminal is running (start one with /portable
+    # if needed — headless GUI spawn works via detached CREATE_NEW_CONSOLE).
+    if not _spawn_portable_mt5(paths):
+        # Could not start/confirm a running terminal → try direct init anyway
+        pass
+
+    # Connect to the running terminal via its IPC server using path=terminal64.exe
+    # (NOT data_folder — the MetaTrader5 package requires the exe path to attach
+    # to a running IPC server; path=<data_folder> gives IPC initialize failed).
     for attempt in range(3):
-        if mt5.initialize(path=path):          # path=terminal64.exe, connect live
+        if mt5.initialize(path=path):
             logger.info("MT5 connected to terminal (%s)", path)
             _auto_login_if_needed()
             return True
