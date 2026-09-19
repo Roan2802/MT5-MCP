@@ -1,9 +1,8 @@
 """Standalone verification script for MT5-MCP — reproduces the E2E test.
 
 Usage:
-    cd C:\AI\MT5_MCP\MT5-MCP-main
     set PYTHONPATH=
-    .venv\Scripts\python.exe scripts\verify_mcp_quick.py
+    "C:\AI\MT5_MCP\MT5-MCP-main\.venv\Scripts\python.exe" "C:\AI\MT5_MCP\MT5-MCP-main\scripts\verify_mcp_quick.py"
 
 Run AFTER starting the portable MT5 (START-MT5-IC-MARKETS.bat in desktop).
 """
