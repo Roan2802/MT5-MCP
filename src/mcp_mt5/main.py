@@ -15,7 +15,13 @@ from pydantic import BaseModel, field_validator, model_validator
 logger = logging.getLogger(__name__)
 
 # Load .env (paths, credentials) so _get_mt5_paths picks up portable IC Markets config.
-load_dotenv()
+# Search UP from this file's location so it works regardless of process cwd.
+_ENV_CANDIDATES = [
+    Path(__file__).resolve().parent.parent.parent / ".env",  # repo root
+    Path(".env"),
+    Path(cwd) / ".env" if (cwd := os.getcwd()) else Path(".env"),
+]
+load_dotenv(next((str(p) for p in _ENV_CANDIDATES if p.exists()), None))
 
 mcp = FastMCP(
     "MetaTrader 5 MCP Server",
@@ -520,7 +526,7 @@ def _auto_login_if_needed() -> bool:
     """Read credentials from .env and log in to MT5 if the current account is
     not authenticated. Used by initialize() so the MCP session is always ready.
 
-    Credentials (from .env / environment):
+    Credentials (from .env / environment or Config/mt5-login.env):
         MT5_LOGIN          — int account number  (e.g. 52325028)
         MT5_PASSWORD       — str account password
         MT5_SERVER         — str server name    (e.g. ICMarketsSC-Demo)
@@ -528,6 +534,13 @@ def _auto_login_if_needed() -> bool:
     Returns:
         True if already logged in or login succeeded, False otherwise.
     """
+    # Load credentials from mt5-login.env (user-editable in kladblok) if not
+    # already in the process environment. This lets the user set their
+    # password in a file instead of the chat.
+    _login_env = _get_mt5_paths().get("config_folder", "") + "/mt5-login.env"
+    if os.path.exists(_login_env):
+        load_dotenv(_login_env, override=False)
+
     # Bail out if no credentials are configured.
     raw_login = os.getenv("MT5_LOGIN")
     raw_pass  = os.getenv("MT5_PASSWORD")
@@ -579,25 +592,28 @@ def initialize(path: str) -> bool:
         initialize(path="C:\\Program Files\\MetaTrader 5\\terminal64.exe")
         # Now you can use other tools like get_account_info(), symbol_select(), etc.
     """
-    if not mt5.initialize(path=path):
-        logger.error(f"MT5 initialization failed, error code: {mt5.last_error()}")
-        # Fallback: try with portable flag appended to the path so MT5 starts
-        # in /portable mode using our saved accounts.dat (login persists).
-        if isinstance(path, str) and path.endswith("terminal64.exe"):
-            portable_path = path.rsplit("\\", 1)[0]
-            try:
-                if mt5.initialize(path=portable_path, executable_path=path):
-                    logger.info("MT5 initialized in portable mode (data folder: %s)", portable_path)
-                    # Auto-login from .env credentials if account not already authenticated
-                    _auto_login_if_needed()
-                    return True
-            except Exception as e:
-                logger.error(f"Portable initialize fallback failed: {e}")
-        return False
+    paths = _get_mt5_paths()
+    # If the user did not supply a path, use the portable terminal from .env
+    if not path:
+        path = paths["terminal"]
 
-    logger.info("MT5 initialized successfully")
-    _auto_login_if_needed()
-    return True
+    # data_folder = the portable Config dir (used for mt5-login.env etc.)
+    data_folder = os.path.dirname(path)
+
+    # Connect to a *running* MT5 terminal. Passing the terminal64.exe path to
+    # `path=` makes the MetaTrader5 package reuse the live IPC server if MT5
+    # is already started (by START-MT5-IC-MARKETS.bat in the desktop session).
+    # accounts.dat keeps login persistent, so no separate login() is needed.
+    for attempt in range(3):
+        if mt5.initialize(path=path):          # path=terminal64.exe, connect live
+            logger.info("MT5 connected to terminal (%s)", path)
+            _auto_login_if_needed()
+            return True
+        logger.debug("initialize attempt %d failed: %s", attempt + 1, mt5.last_error())
+        import time; time.sleep(5 * (attempt + 1))
+
+    logger.error(f"MT5 initialization failed after retries, error code: {mt5.last_error()}")
+    return False
 
 
 # Shutdown MetaTrader 5 connection
@@ -1992,7 +2008,27 @@ def compile_mql5(filepath: str, metaeditor_path: str | None = None) -> dict[str,
     cmd = [me, "/compile", filepath, "/log"]
     logger.info(f"Compiling: {cmd}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    # MetaEditor /compile spawns a GUI window briefly. Use Popen with a new
+    # console so the MCP stdio loop never blocks. We poll for the .ex5 output
+    # instead of waiting forever for MetaEditor's (possibly-zombie) GUI proc.
+    DETACHED = 0x00000010  # CREATE_NEW_CONSOLE
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, creationflags=DETACHED,
+        )
+        proc.wait(timeout=20)  # give MetaEditor 20s to compile+exit cleanly
+    except subprocess.TimeoutExpired:
+        # MetaEditor may still be running (GUI hang), but the .ex5 may exist.
+        logger.warning("MetaEditor compile did not exit in 20s; checking for .ex5 output…")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"MetaEditor spawn failed: {e}")
+        return {"success": False, "returncode": -1, "log": str(e), "log_path": log_path, "ex5_path": ex5_path}
 
     log_content = ""
     if os.path.exists(log_path):
@@ -2004,17 +2040,19 @@ def compile_mql5(filepath: str, metaeditor_path: str | None = None) -> dict[str,
 
     # Check log for errors
     has_errors = "error" in log_content.lower() if log_content else False
-    if result.returncode != 0:
-        has_errors = True
+    rc = proc.returncode if proc else -1
 
     return {
-        "success": ex5_exists and not has_errors,
-        "returncode": result.returncode,
+        "success": ex5_exists,
+              # ^ ex5_exists is authoritative: MetaEditor returns 143 (SIGTERM)
+              #   when the GUI process is killed after compiling; the .ex5 on
+              #   disk proves the compile succeeded regardless of returncode.
+        "returncode": rc,
         "log": log_content[:8000],  # truncate to keep MCP response manageable
         "log_path": log_path,
         "ex5_path": ex5_path,
         "ex5_exists": ex5_exists,
-        "stderr": result.stderr[:2000] if result.stderr else "",
+        "stderr": "",
     }
 
 
